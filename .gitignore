@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+
+# Logs & data
+*.log
+adx_bot.log
+adx_bot.pid
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# MSI installer (downloaded)
+*.msi
+
+# Extracted files
+mtapi_extracted/
+msi_extract/
+
+# Binary dependencies (downloaded)
+*.dll
+*.ex4
+*.mq4
+*.mqh
+
+# Git
+*.orig
