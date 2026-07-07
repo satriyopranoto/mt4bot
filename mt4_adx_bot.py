@@ -1,7 +1,7 @@
-#!/usr/bin/env python3
+# mt4_adx_bot.py — ADX + Basis Trend Trading Bot for XAUUSD (BUY #!/usr/bin/env python3 SHORT)
 # mt4_adx_bot.py — ADX + Basis Trend Trading Bot for XAUUSD
 # Strategy ported from backtester/strategies/basis_adx_strategy.py
-# BUY only. Entry: low>SL & close>basis & ADX>20 & ADX>ADX[5] & +DI>-DI & +DI>+DI[5]
+# BUY & SELL SHORT. Entry: low>SL & close>basis & ADX>20 & ADX>ADX[5] & +DI>-DI & +DI>+DI[5]
 # Exit: (floating>0.4R & high<SL) | high<CL
 # -*- coding: utf-8 -*-
 
@@ -132,9 +132,10 @@ def calc_adx_local(high, low, close, period=14):
 # ──────────────────────── Trading Bot ───────────────────────────
 
 class BasisAdxBot:
-    """ADX + Basis trend-following bot — BUY only."""
+    """ADX + Basis trend-following bot — BUY & SELL SHORT."""
 
     OP_BUY = 0
+    OP_SELL = 1
 
     def __init__(self, config=None):
         self.cfg = {**CONFIG, **(config or {})}
@@ -147,6 +148,7 @@ class BasisAdxBot:
         self.entry_sl = None          # CL (fixed SL at entry)
         self.tp_threshold_pct = None  # 0.4R in percent
         self.entry_time = None
+        self.position_direction = None  # 'BUY' or 'SELL'
 
         # Cached OHLCV data
         self._high_buffer = deque(maxlen=100)
@@ -368,12 +370,69 @@ class BasisAdxBot:
             log.info(f"  [NO] No signal. Failed: {', '.join(failed)}")
             return {'signal': False, 'reason': f"failed: {', '.join(failed)}"}
 
+    def check_entry_short(self):
+        """
+        Check SHORT SELL entry conditions.
+        Entry: high<SL & close<basis & ADX>20 & ADX>ADX[5] & -DI>+DI & -DI>-DI[5]
+        """
+        rates = self.fetch_ohlcv(2)
+        if not rates or len(rates) < 2:
+            return {'signal': False, 'reason': 'no_data'}
+        prev = rates[1]
+        close = float(prev.get('Close', 0))
+        low = float(prev.get('Low', 0))
+        high = float(prev.get('High', 0))
+
+        all_rates = self.fetch_ohlcv(80)
+        if not all_rates or len(all_rates) < self.cfg['min_bars']:
+            return {'signal': False, 'reason': 'insufficient_data'}
+        closes = np.array([float(r.get('Close', 0)) for r in reversed(all_rates)])
+        highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
+        lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
+        basis_arr = calc_basis(closes, self.cfg['bb_period'])
+        basis = float(basis_arr[-1])
+        sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
+        sl = float(sl_arr[-1])
+
+        adx0, pdi0, mdi0 = self.get_adx_values(1)
+        adx5, pdi5, mdi5 = self.get_adx_values(6)
+        if any(v is None for v in [adx0, pdi0, mdi0, adx5, pdi5, mdi5]):
+            return {'signal': False, 'reason': 'adx_nan'}
+
+        log.info(f"  -- Short Signal Check --")
+        log.info(f"  Close={close:.2f}  Basis={basis:.2f}  SL={sl:.2f}")
+        log.info(f"  ADX={adx0:.1f}  ADX[5]={adx5:.1f}")
+        log.info(f"  -DI={mdi0:.1f}  -DI[5]={mdi5:.1f}  +DI={pdi0:.1f}")
+        log.info(f"  High={high:.2f}  High<SL={high<sl}")
+
+        conditions = {
+            'high < SL': high < sl,
+            'close < basis': close < basis,
+            'ADX > 20': adx0 > self.cfg['adx_min'],
+            'ADX > ADX[5]': adx0 > adx5,
+            '-DI > +DI': mdi0 > pdi0,
+            '-DI > -DI[5]': mdi0 > mdi5,
+        }
+        all_ok = all(conditions.values())
+        failed = [k for k, v in conditions.items() if not v]
+        if all_ok:
+            log.info(f"  [SELL] SHORT SIGNAL! All conditions met")
+            return {
+                'signal': True, 'reason': 'all_conditions_met',
+                'close': close, 'sl': sl, 'basis': basis,
+                'adx': adx0, 'pdi': pdi0, 'mdi': mdi0,
+            }
+        else:
+            log.info(f"  [NO] No short signal. Failed: {', '.join(failed)}")
+            return {'signal': False, 'reason': f"failed: {', '.join(failed)}"}
+
     # ──────── Exit Check ────────
 
     def check_exit(self):
         """
         Check exit conditions while in position.
-        Exit: (floating > 0.4R AND high < SL) OR high < CL
+        LONG:  TP=(floating>0.4R & high<trailSL) | CL=(high<entrySL)
+        SHORT: TP=(abs(float)>0.4R & low>trailSL) | CL=(close>entrySL)
         Returns True if should exit.
         """
         if self.entry_sl is None or self.position_entry_price is None:
@@ -386,47 +445,57 @@ class BasisAdxBot:
         if not rates or len(rates) < 2:
             return False
 
-        current = rates[0]  # shift 0 (current incomplete)
-        prev = rates[1]     # shift 1 (last complete)
-
-        # Use current incomplete bar high & last complete bar close
+        current = rates[0]
+        prev = rates[1]
         close = float(prev.get('Close', 0))
         high = float(prev.get('High', 0))
+        low = float(prev.get('Low', 0))
         current_high = float(current.get('High', 0))
+        current_low = float(current.get('Low', 0))
         highest = max(high, current_high)
+        lowest = min(low, current_low)
 
-        # Calculate current Donchian SL (trailing)
         all_rates = self.fetch_ohlcv(80)
         if not all_rates or len(all_rates) < 30:
             return False
-
         highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
         lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
         sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
         current_sl = float(sl_arr[-1])
 
-        # CL = entry_sl (fixed)
         CL = self.entry_sl
-        floating_pct = ((close - self.position_entry_price) / self.position_entry_price) * 100.0
         stop_dist_pct = abs(self.position_entry_price - CL) / self.position_entry_price * 100.0
-        tp_pct = stop_dist_pct * self.cfg['tp_r_multiple']  # 0.4R
+        tp_pct = stop_dist_pct * self.cfg['tp_r_multiple']
 
-        log.info(f"  -- Exit Check --")
-        log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
-        log.info(f"  Float={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-        log.info(f"  High={highest:.2f}  Current SL={current_sl:.2f}  CL={CL:.2f}")
-        log.info(f"  Float>{tp_pct:.2f}%? {floating_pct > tp_pct}")
-        log.info(f"  High<SL? {highest < current_sl}  High<CL? {highest < CL}")
+        if self.position_direction == 'BUY':
+            floating_pct = ((close - self.position_entry_price) / self.position_entry_price) * 100.0
+            log.info(f"  -- Exit Check (LONG) --")
+            log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
+            log.info(f"  Float={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
+            log.info(f"  High={highest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
+            # TP: floating > 0.4R AND high < trailing SL
+            if floating_pct > tp_pct and highest < current_sl:
+                log.info(f"  [TP] Take Profit: Float>{tp_pct:.2f}% AND High<SL")
+                return True
+            # CL: high < entry SL
+            if highest < CL:
+                log.warning(f"  [CL] Cut Loss: High ({highest:.2f}) < CL ({CL:.2f})")
+                return True
 
-        # --- CUT LOSS: high < CL (entry SL) ---
-        if highest < CL:
-            log.warning(f"  [EXIT] CUT LOSS: High ({highest:.2f}) < CL ({CL:.2f})")
-            return True
-
-        # --- TAKE PROFIT: floating > 0.4R AND high < current SL ---
-        if floating_pct > tp_pct and highest < current_sl:
-            log.info(f"  [TP] TAKE PROFIT: Float={floating_pct:.2f}>{tp_pct:.2f}% AND High<SL")
-            return True
+        elif self.position_direction == 'SELL':
+            floating_pct = ((self.position_entry_price - close) / self.position_entry_price) * 100.0
+            log.info(f"  -- Exit Check (SHORT) --")
+            log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
+            log.info(f"  Profit={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
+            log.info(f"  Low={lowest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
+            # TP for Short: floating profit > 0.4R AND low > trailing SL (price bounced to resistance)
+            if floating_pct > tp_pct and lowest > current_sl:
+                log.info(f"  [TP] Short TP: Profit>{tp_pct:.2f}% AND Low>SL")
+                return True
+            # CL for Short: close above entry SL (price broke above resistance)
+            if close > CL:
+                log.warning(f"  [CL] Short CL: Close ({close:.2f}) > CL ({CL:.2f})")
+                return True
 
         return False
 
@@ -489,6 +558,59 @@ class BasisAdxBot:
             log.error(f"  [FAIL] Order failed: {e}")
             return None
 
+    def place_sell(self, signal_info):
+        """Place a SELL order with SL at Donchian level (fixed lot)."""
+        price_info = self.get_current_price()
+        if not price_info:
+            log.error("  Cannot get current price")
+            return None
+
+        entry_price = price_info['bid']
+        sl_price = signal_info['sl']
+
+        # Ensure SL is above entry for shorts
+        if sl_price <= entry_price:
+            log.warning(f"  SL ({sl_price:.2f}) <= entry ({entry_price:.2f}), adjusting")
+            sl_price = entry_price + (entry_price * 0.01)
+
+        stop_dist = abs(entry_price - sl_price)
+        if stop_dist <= 0:
+            log.error("  Stop distance is zero, cannot place order")
+            return None
+
+        lot_size = self.cfg['fixed_lot']
+        tp_price = round(entry_price - (stop_dist * 3), 2)
+
+        log.info(f"  -- Placing SELL --")
+        log.info(f"  Symbol={self.cfg['symbol']}  Lots={lot_size}")
+        log.info(f"  Entry={entry_price:.2f}  SL={sl_price:.2f}  TP={tp_price:.2f}")
+        log.info(f"  Stop dist: {stop_dist:.2f} ({stop_dist/0.01:.0f} pips)")
+
+        order = {
+            'Symbol': self.cfg['symbol'],
+            'Cmd': self.OP_SELL,
+            'Volume': lot_size,
+            'Price': entry_price,
+            'Slippage': 3,
+            'Stoploss': sl_price,
+            'Takeprofit': tp_price,
+            'Comment': f'ADXBot Short {self.cfg["adx_period"]}',
+            'Magic': self.cfg['magic_number'],
+        }
+
+        try:
+            result = self.client.order_send(order)
+            if result:
+                ticket = int(result) if not isinstance(result, dict) else result.get('Value', 0)
+                log.info(f"  [OK] SELL executed! Ticket #{ticket}")
+                return ticket
+            else:
+                log.error("  [FAIL] SELL order failed: no response")
+                return None
+        except Mt4ApiError as e:
+            log.error(f"  [FAIL] SELL order failed: {e}")
+            return None
+
     def close_position(self, ticket):
         """Close position by ticket."""
         try:
@@ -510,7 +632,6 @@ class BasisAdxBot:
             if price:
                 log.info(f"  {self.cfg['symbol']}: Bid={price['bid']:.2f}  Ask={price['ask']:.2f}")
 
-            # Check if we have an open position (from bot state)
             position = self.check_position()
 
             if position:
@@ -519,50 +640,63 @@ class BasisAdxBot:
                     # Restore state from position
                     self.position_ticket = ticket
                     self.position_entry_price = float(position.get('OpenPrice', 0))
-                    # entry_sl should already be set, but if not, use position SL
+                    cmd = int(position.get('Cmd', -1))
+                    self.position_direction = 'BUY' if cmd == 0 else 'SELL' if cmd == 1 else None
                     if self.entry_sl is None:
                         self.entry_sl = float(position.get('StopLoss', 0))
                     if self.position_entry_price and self.entry_sl:
                         stop_dist_pct = abs(self.position_entry_price - self.entry_sl) / self.position_entry_price * 100.0
                         self.tp_threshold_pct = stop_dist_pct * self.cfg['tp_r_multiple']
 
-                log.info(f"  Position: #{ticket} @ {self.position_entry_price:.2f}")
+                log.info(f"  Position: #{ticket} {'LONG' if self.position_direction=='BUY' else 'SHORT'} @ {self.position_entry_price:.2f}")
                 log.info(f"  CL={self.entry_sl}  TP threshold={self.tp_threshold_pct:.3f}%")
 
-                # Check exit
                 if self.check_exit():
                     self.close_position(ticket)
                     self.position_ticket = None
                     self.position_entry_price = None
                     self.entry_sl = None
                     self.tp_threshold_pct = None
+                    self.position_direction = None
                 else:
                     log.info(f"  Holding position (no exit signal)")
 
             else:
-                # Reset position state if MT4 shows no position
                 if self.position_ticket is not None:
                     log.info("  Position closed externally")
                     self.position_ticket = None
                     self.position_entry_price = None
                     self.entry_sl = None
                     self.tp_threshold_pct = None
+                    self.position_direction = None
 
-                # Check entry signal
-                log.info(f"  No position. Checking entry...")
+                # Check LONG entry first
+                log.info(f"  No position. Checking LONG entry...")
                 signal = self.check_entry()
-
                 if signal and signal.get('signal'):
                     ticket = self.place_buy(signal)
                     if ticket:
                         self.position_ticket = ticket
                         self.position_entry_price = signal['close']
                         self.entry_sl = signal['sl']
+                        self.position_direction = 'BUY'
                         stop_dist_pct = abs(signal['close'] - signal['sl']) / signal['close'] * 100.0
                         self.tp_threshold_pct = stop_dist_pct * self.cfg['tp_r_multiple']
-                        log.info(f"  [OK] Position opened! TP threshold={self.tp_threshold_pct:.3f}%")
+                        log.info(f"  [OK] LONG opened! TP threshold={self.tp_threshold_pct:.3f}%")
                 else:
-                    log.info(f"  {signal.get('reason', 'no_signal')}")
+                    # If no LONG, check SHORT
+                    log.info(f"  No LONG. Checking SHORT entry...")
+                    signal = self.check_entry_short()
+                    if signal and signal.get('signal'):
+                        ticket = self.place_sell(signal)
+                        if ticket:
+                            self.position_ticket = ticket
+                            self.position_entry_price = signal['close']
+                            self.entry_sl = signal['sl']
+                            self.position_direction = 'SELL'
+                            stop_dist_pct = abs(signal['close'] - signal['sl']) / signal['close'] * 100.0
+                            self.tp_threshold_pct = stop_dist_pct * self.cfg['tp_r_multiple']
+                            log.info(f"  [OK] SHORT opened! TP threshold={self.tp_threshold_pct:.3f}%")
 
         except Mt4ApiError as e:
             log.error(f"  Cycle error: {e}")
@@ -577,7 +711,7 @@ class BasisAdxBot:
         log.info("  ADX + Basis Trading Bot for XAUUSD")
         log.info(f"  Timeframe: H1  |  ADX({self.cfg['adx_period']})  |  Basis({self.cfg['bb_period']})")
         log.info(f"  Donchian SL: {self.cfg['sl_multiple']}x{self.cfg['sl_period']}  |  TP: {self.cfg['tp_r_multiple']}R")
-        log.info(f"  Lot: {self.cfg['fixed_lot']} fixed  |  BUY only")
+        log.info(f"  Lot: {self.cfg['fixed_lot']} fixed  |  BUY & SELL SHORT")
         log.info("=" * 64)
 
         if not self.connect():
