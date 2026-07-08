@@ -389,7 +389,7 @@ class BasisAdxBot:
 
         # Multi TF: add daily +DI > -DI (no close>daily basis required)
         if self.cfg['mode'] == 'multi_tf':
-            dpdi, dmdi = self.get_daily_adx_values(1)
+            _, dpdi, dmdi = self.get_daily_adx_values(1)
             if dpdi is not None and dmdi is not None:
                 conditions['daily +DI > -DI'] = dpdi > dmdi
                 log.info(f"  Daily +DI={dpdi:.1f}  -DI={dmdi:.1f}  +DI>-DI={dpdi>dmdi}")
@@ -453,7 +453,7 @@ class BasisAdxBot:
 
         # Multi TF: add daily -DI > +DI (bearish daily)
         if self.cfg['mode'] == 'multi_tf':
-            dpdi, dmdi = self.get_daily_adx_values(1)
+            _, dpdi, dmdi = self.get_daily_adx_values(1)
             if dpdi is not None and dmdi is not None:
                 conditions['daily -DI > +DI'] = dmdi > dpdi
                 log.info(f"  Daily +DI={dpdi:.1f}  -DI={dmdi:.1f}  -DI>+DI={dmdi>dpdi}")
