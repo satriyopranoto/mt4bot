@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# mt4_adx_bot.py — ADX + Basis Trend Trading Bot (TEMPLATE)
-# Template for XAUUSD. Copy to mt4_adx_bot_<symbol>.py for each instrument.
+# mt4_adx_bot_usdchf.py — ADX + Basis Trend Trading Bot (USDCHF)
+# Copy of template, configured for USDCHF.
 # BUY & SELL SHORT with Multi TF Moderat entry filter
 # BUY:  low>SL & close>basis & ADX>20 & ADX>ADX[5] & +DI>-DI & +DI>+DI[5]
 #       + (multi_tf: daily +DI > daily -DI)
@@ -31,12 +31,12 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(os.path.join(os.path.dirname(__file__), 'adx_bot.log'), mode='a'),
+        logging.FileHandler(os.path.join(os.path.dirname(__file__), 'adx_bot_usdchf.log'), mode='a'),
     ]
 )
 log = logging.getLogger('adx_bot')
 
-PID_FILE = os.path.join(os.path.dirname(__file__), 'adx_bot.pid')
+PID_FILE = os.path.join(os.path.dirname(__file__), 'adx_bot_usdchf.pid')
 
 # ──────────────────────── Config ────────────────────────────────
 
@@ -45,7 +45,7 @@ CONFIG = {
     'port': 8222,
 
     # Symbol & timeframe
-    'symbol': 'XAUUSD',
+    'symbol': 'USDCHF',
     'timeframe': 60,               # H1
 
     # Mode

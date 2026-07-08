@@ -14,7 +14,9 @@ venv/
 # Logs & data
 *.log
 adx_bot.log
+adx_bot_usdchf.log
 adx_bot.pid
+adx_bot_usdchf.pid
 
 # IDE
 .vscode/
