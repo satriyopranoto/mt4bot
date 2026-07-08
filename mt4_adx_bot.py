@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # mt4_adx_bot.py — ADX + Basis Trend Trading Bot (BUY & SELL SHORT)
-# Multi TF Moderat strategy ported from backtester run_id_1h_multitf_mod.py
+# Strategy from backtester + Multi TF Moderat entry filter
 # BUY:  low>SL & close>basis & ADX>20 & ADX>ADX[5] & +DI>-DI & +DI>+DI[5]
+#       + (multi_tf: daily +DI > daily -DI)
 # SELL: high<SL & close<basis & ADX>20 & ADX>ADX[5] & -DI>+DI & -DI>-DI[5]
-# Multi TF (opt): daily +DI > -DI (BUY) or daily -DI > +DI (SELL)
-# SL: HH(28) - 2*ATR(10)*(2.8-1)/2.8  [= HH(28) - 1.2857*ATR(10)]
-# Exit: TP=(floating>0.4R & high<trailSL) | CL=high<entrySL (LONG)
-#        TP=(abs(float)>0.4R & low>trailSL) | CL=close>entrySL (SHORT)
+#       + (multi_tf: daily -DI > daily +DI)
+# SL: Donchian (2.8x10)
+# Exit: (floating>0.4R & high<trailSL) | high<CL (LONG)
+#        (abs(float)>0.4R & low>trailSL) | close>CL (SHORT)
 # -*- coding: utf-8 -*-
 
 import json
@@ -56,11 +57,9 @@ CONFIG = {
     # Basis = SMA(close, 20)
     'bb_period': 20,
 
-    # ATR-based trailing SL (from backtester run_id_1h_multitf_mod.py)
-    # SL = HH(sl_lookback) - 2*ATR(sl_atr_period)*(sl_multiple-1)/sl_multiple
+    # Donchian SL
     'sl_multiple': 2.8,
-    'sl_lookback': 28,             # HH lookback period
-    'sl_atr_period': 10,           # ATR period for SL
+    'sl_period': 10,               # ero = int(2.8 * 10) = 28
 
     # Entry thresholds
     'adx_min': 20,
@@ -85,32 +84,21 @@ CONFIG = {
 
 # ──────────────────────── Indicator Functions ───────────────────
 
-def calc_atr_trailing_sl(high, low, close, lookback=28, atr_period=10, multiplier=2.8):
-    """ATR-based trailing SL ported from backtester run_id_1h_multitf_mod.py.
-
-    SL = HH(lookback) - 2*ATR(atr_period)*(multiplier-1)/multiplier
-
-    For multiplier=2.8, atr_period=10: SL = HH(28) - 1.2857*ATR(10)
-    """
+def donchian_sl(high, low, atr_multiple=2.8, atr_period=10):
+    """Donchian Channel SL — ported from backtester."""
+    ero = int(atr_multiple * atr_period)
     s_high = pd.Series(high)
     s_low = pd.Series(low)
-    s_close = pd.Series(close)
 
-    # True Range
-    prev_close = s_close.shift(1)
-    tr = pd.concat([
-        s_high - s_low,
-        (s_high - prev_close).abs(),
-        (s_low - prev_close).abs(),
-    ], axis=1).max(axis=1).values
+    r_prev = s_high.rolling(window=ero).max().shift(1).values
+    s_prev = s_low.rolling(window=ero).min().shift(1).values
+    r_curr = s_high.rolling(window=ero).max().values
+    s_curr = s_low.rolling(window=ero).min().values
 
-    # HH(lookback) and ATR(atr_period)
-    hh = s_high.rolling(window=lookback).max().values
-    atr = pd.Series(tr).rolling(window=atr_period).mean().values
+    ab = np.where(high > r_prev, 1, np.where(low < s_prev, -1, 0))
+    ac = pd.Series(ab).replace(0, np.nan).ffill().fillna(0).values
 
-    mult = 2 * (multiplier - 1) / multiplier
-    sl = hh - mult * atr
-
+    sl = np.where(ac == 1, s_curr, r_curr)
     return sl.astype(float)
 
 
@@ -324,20 +312,13 @@ class BasisAdxBot:
 
     # ──────── Signal Detection ────────
 
-    def calc_atr_sl_current(self):
-        """Calculate current ATR-based trailing SL from cached data.
-        SL = HH(28) - 1.2857*ATR(10)"""
+    def calc_donchian_sl_current(self):
+        """Calculate current Donchian SL from cached data."""
         if len(self._high_buffer) < 40 or len(self._low_buffer) < 40:
             return None
         arr_h = np.array(list(self._high_buffer))
         arr_l = np.array(list(self._low_buffer))
-        arr_c = np.array(list(self._close_buffer))
-        sl_arr = calc_atr_trailing_sl(
-            arr_h, arr_l, arr_c,
-            lookback=self.cfg['sl_lookback'],
-            atr_period=self.cfg['sl_atr_period'],
-            multiplier=self.cfg['sl_multiple'],
-        )
+        sl_arr = donchian_sl(arr_h, arr_l, self.cfg['sl_multiple'], self.cfg['sl_period'])
         return float(sl_arr[-1])
 
     def calc_basis_current(self):
@@ -348,14 +329,9 @@ class BasisAdxBot:
         basis_arr = calc_basis(arr_c, self.cfg['bb_period'])
         return float(basis_arr[-1])
 
-    def _calc_sl(self, closes, highs, lows):
-        """Calculate ATR-based trailing SL from arrays."""
-        sl_arr = calc_atr_trailing_sl(
-            highs, lows, closes,
-            lookback=self.cfg['sl_lookback'],
-            atr_period=self.cfg['sl_atr_period'],
-            multiplier=self.cfg['sl_multiple'],
-        )
+    def _calc_sl(self, highs, lows):
+        """Calculate Donchian SL from arrays."""
+        sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
         return float(sl_arr[-1])
 
     def check_entry(self):
@@ -381,7 +357,7 @@ class BasisAdxBot:
 
         basis_arr = calc_basis(closes, self.cfg['bb_period'])
         basis = float(basis_arr[-1])
-        sl = self._calc_sl(closes, highs, lows)
+        sl = self._calc_sl(highs, lows)
 
         adx0, pdi0, mdi0 = self.get_adx_values(1)
         adx5, pdi5, mdi5 = self.get_adx_values(6)
@@ -445,7 +421,7 @@ class BasisAdxBot:
 
         basis_arr = calc_basis(closes, self.cfg['bb_period'])
         basis = float(basis_arr[-1])
-        sl = self._calc_sl(closes, highs, lows)
+        sl = self._calc_sl(highs, lows)
 
         adx0, pdi0, mdi0 = self.get_adx_values(1)
         adx5, pdi5, mdi5 = self.get_adx_values(6)
@@ -517,19 +493,13 @@ class BasisAdxBot:
         highest = max(high, current_high)
         lowest = min(low, current_low)
 
-        # Calculate current ATR trailing SL
+        # Calculate current Donchian SL (trailing)
         all_rates = self.fetch_ohlcv(80)
         if not all_rates or len(all_rates) < 30:
             return False
-        closes = np.array([float(r.get('Close', 0)) for r in reversed(all_rates)])
         highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
         lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
-        sl_arr = calc_atr_trailing_sl(
-            highs, lows, closes,
-            lookback=self.cfg['sl_lookback'],
-            atr_period=self.cfg['sl_atr_period'],
-            multiplier=self.cfg['sl_multiple'],
-        )
+        sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
         current_sl = float(sl_arr[-1])
 
         CL = self.entry_sl
@@ -776,7 +746,7 @@ class BasisAdxBot:
         log.info("=" * 64)
         log.info(f"  ADX + Basis Trading Bot — {mode_label}")
         log.info(f"  Symbol: {self.cfg['symbol']}  |  H1  |  ADX({self.cfg['adx_period']})  |  Basis({self.cfg['bb_period']})")
-        log.info(f"  SL: HH({self.cfg['sl_lookback']}) - 2*ATR({self.cfg['sl_atr_period']})*(mult-1)/mult  |  TP: {self.cfg['tp_r_multiple']}R")
+        log.info(f"  Donchian SL: {self.cfg['sl_multiple']}x{self.cfg['sl_period']}  |  TP: {self.cfg['tp_r_multiple']}R")
         log.info(f"  Lot: {self.cfg['fixed_lot']} fixed  |  BUY & SELL SHORT")
         log.info("=" * 64)
 
