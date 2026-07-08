@@ -675,7 +675,7 @@ class BasisAdxBot:
                     # Restore state from position
                     self.position_ticket = ticket
                     self.position_entry_price = float(position.get('OpenPrice', 0))
-                    cmd = int(position.get('Cmd', -1))
+                    cmd = int(position.get('Cmd', position.get('Operation', -1)))
                     self.position_direction = 'BUY' if cmd == 0 else 'SELL' if cmd == 1 else None
                     if self.entry_sl is None:
                         self.entry_sl = float(position.get('StopLoss', 0))
