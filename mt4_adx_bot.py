@@ -69,7 +69,11 @@ CONFIG = {
     'tp_r_multiple': 0.4,          # 0.4R
 
     # Risk
-    'fixed_lot': 0.2,              # Fixed lot size
+    'fixed_lot': 0.2,              # Default lot (overridden by symbol_lots if matched)
+    'symbol_lots': {               # Per-symbol lot sizes
+        'XAUUSD': 0.05,
+        'USDCHF': 0.2,
+    },
 
     # Magic number
     'magic_number': 20260706,
@@ -152,6 +156,9 @@ class BasisAdxBot:
 
     def __init__(self, config=None):
         self.cfg = {**CONFIG, **(config or {})}
+        # Resolve symbol-specific lot size
+        sym = self.cfg['symbol']
+        self.cfg['fixed_lot'] = self.cfg.get('symbol_lots', {}).get(sym, self.cfg['fixed_lot'])
         self.client = None
         self.running = False
 
