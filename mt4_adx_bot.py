@@ -5,7 +5,8 @@
 # SELL: high<SL & close<basis & ADX>20 & ADX>ADX[5] & -DI>+DI & -DI>-DI[5]
 # Multi TF (opt): daily +DI > -DI (BUY) or daily -DI > +DI (SELL)
 # SL: HH(28) - 2*ATR(10)*(2.8-1)/2.8  [= HH(28) - 1.2857*ATR(10)]
-# Exit: TP=floating>0.4R | CL=price<entrySL (LONG) / price>entrySL (SHORT)
+# Exit: TP=(floating>0.4R & high<trailSL) | CL=high<entrySL (LONG)
+#        TP=(abs(float)>0.4R & low>trailSL) | CL=close>entrySL (SHORT)
 # -*- coding: utf-8 -*-
 
 import json
@@ -492,9 +493,8 @@ class BasisAdxBot:
     def check_exit(self):
         """
         Check exit conditions while in position.
-        Exit (ported from backtester run_id_1h_multitf_mod.py):
-          LONG:  TP=floating>0.4R | CL=high<entrySL
-          SHORT: TP=abs(float)>0.4R | CL=close>entrySL
+          LONG:  TP=(floating>0.4R & high<trailSL) | CL=(high<entrySL)
+          SHORT: TP=(abs(float)>0.4R & low>trailSL) | CL=(close>entrySL)
         Returns True if should exit.
         """
         if self.entry_sl is None or self.position_entry_price is None:
@@ -517,6 +517,21 @@ class BasisAdxBot:
         highest = max(high, current_high)
         lowest = min(low, current_low)
 
+        # Calculate current ATR trailing SL
+        all_rates = self.fetch_ohlcv(80)
+        if not all_rates or len(all_rates) < 30:
+            return False
+        closes = np.array([float(r.get('Close', 0)) for r in reversed(all_rates)])
+        highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
+        lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
+        sl_arr = calc_atr_trailing_sl(
+            highs, lows, closes,
+            lookback=self.cfg['sl_lookback'],
+            atr_period=self.cfg['sl_atr_period'],
+            multiplier=self.cfg['sl_multiple'],
+        )
+        current_sl = float(sl_arr[-1])
+
         CL = self.entry_sl
         stop_dist_pct = abs(self.position_entry_price - CL) / self.position_entry_price * 100.0
         tp_pct = stop_dist_pct * self.cfg['tp_r_multiple']
@@ -526,13 +541,13 @@ class BasisAdxBot:
             log.info(f"  -- Exit Check (LONG) --")
             log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
             log.info(f"  Float={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-            log.info(f"  High={highest:.2f}  CL={CL:.2f}")
+            log.info(f"  High={highest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
 
-            # TP: floating > 0.4R (pure, no trailing SL condition)
-            if floating_pct > tp_pct:
-                log.info(f"  [TP] Take Profit: Float={floating_pct:.2f}>{tp_pct:.2f}%")
+            # TP: floating > 0.4R AND high < trailing SL
+            if floating_pct > tp_pct and highest < current_sl:
+                log.info(f"  [TP] Take Profit: Float>{tp_pct:.2f}% AND High<SL")
                 return True
-            # CL: high < entry SL
+            # CL: high < entry SL (fixed)
             if highest < CL:
                 log.warning(f"  [CL] Cut Loss: High ({highest:.2f}) < CL ({CL:.2f})")
                 return True
@@ -542,13 +557,13 @@ class BasisAdxBot:
             log.info(f"  -- Exit Check (SHORT) --")
             log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
             log.info(f"  Profit={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-            log.info(f"  Low={lowest:.2f}  CL={CL:.2f}")
+            log.info(f"  Low={lowest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
 
-            # TP for Short: floating > 0.4R
-            if floating_pct > tp_pct:
-                log.info(f"  [TP] Short TP: Profit={floating_pct:.2f}>{tp_pct:.2f}%")
+            # TP for Short: floating > 0.4R AND low > trailing SL
+            if floating_pct > tp_pct and lowest > current_sl:
+                log.info(f"  [TP] Short TP: Profit>{tp_pct:.2f}% AND Low>SL")
                 return True
-            # CL for Short: close > entry SL (price broke above resistance)
+            # CL for Short: close > entry SL
             if close > CL:
                 log.warning(f"  [CL] Short CL: Close ({close:.2f}) > CL ({CL:.2f})")
                 return True
