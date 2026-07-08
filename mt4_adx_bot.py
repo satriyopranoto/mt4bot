@@ -365,10 +365,10 @@ class BasisAdxBot:
             return {'signal': False, 'reason': 'adx_nan'}
 
         log.info(f"  -- LONG Signal Check --")
-        log.info(f"  Close={close:.2f}  Basis={basis:.2f}  SL={sl:.2f}")
+        log.info(f"  Close={close:.5f}  Basis={basis:.5f}  SL={sl:.5f}")
         log.info(f"  ADX={adx0:.1f}  ADX[5]={adx5:.1f}")
         log.info(f"  +DI={pdi0:.1f}  +DI[5]={pdi5:.1f}  -DI={mdi0:.1f}")
-        log.info(f"  Low={low:.2f}  Low>SL={low>sl}")
+        log.info(f"  Low={low:.5f}  Low>SL={low>sl}")
 
         conditions = {
             'low > SL': low > sl,
@@ -429,10 +429,10 @@ class BasisAdxBot:
             return {'signal': False, 'reason': 'adx_nan'}
 
         log.info(f"  -- SHORT Signal Check --")
-        log.info(f"  Close={close:.2f}  Basis={basis:.2f}  SL={sl:.2f}")
+        log.info(f"  Close={close:.5f}  Basis={basis:.5f}  SL={sl:.5f}")
         log.info(f"  ADX={adx0:.1f}  ADX[5]={adx5:.1f}")
         log.info(f"  -DI={mdi0:.1f}  -DI[5]={mdi5:.1f}  +DI={pdi0:.1f}")
-        log.info(f"  High={high:.2f}  High<SL={high<sl}")
+        log.info(f"  High={high:.5f}  High<SL={high<sl}")
 
         conditions = {
             'high < SL': high < sl,
@@ -509,9 +509,9 @@ class BasisAdxBot:
         if self.position_direction == 'BUY':
             floating_pct = ((close - self.position_entry_price) / self.position_entry_price) * 100.0
             log.info(f"  -- Exit Check (LONG) --")
-            log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
+            log.info(f"  Price={close:.5f}  Entry={self.position_entry_price:.5f}")
             log.info(f"  Float={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-            log.info(f"  High={highest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
+            log.info(f"  High={highest:.5f}  TrailSL={current_sl:.5f}  CL={CL:.5f}")
 
             # TP: floating > 0.4R AND high < trailing SL
             if floating_pct > tp_pct and highest < current_sl:
@@ -519,15 +519,15 @@ class BasisAdxBot:
                 return True
             # CL: high < entry SL (fixed)
             if highest < CL:
-                log.warning(f"  [CL] Cut Loss: High ({highest:.2f}) < CL ({CL:.2f})")
+                log.warning(f"  [CL] Cut Loss: High ({highest:.5f}) < CL ({CL:.5f})")
                 return True
 
         elif self.position_direction == 'SELL':
             floating_pct = ((self.position_entry_price - close) / self.position_entry_price) * 100.0
             log.info(f"  -- Exit Check (SHORT) --")
-            log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
+            log.info(f"  Price={close:.5f}  Entry={self.position_entry_price:.5f}")
             log.info(f"  Profit={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-            log.info(f"  Low={lowest:.2f}  TrailSL={current_sl:.2f}  CL={CL:.2f}")
+            log.info(f"  Low={lowest:.5f}  TrailSL={current_sl:.5f}  CL={CL:.5f}")
 
             # TP for Short: floating > 0.4R AND low > trailing SL
             if floating_pct > tp_pct and lowest > current_sl:
@@ -535,7 +535,7 @@ class BasisAdxBot:
                 return True
             # CL for Short: close > entry SL
             if close > CL:
-                log.warning(f"  [CL] Short CL: Close ({close:.2f}) > CL ({CL:.2f})")
+                log.warning(f"  [CL] Short CL: Close ({close:.5f}) > CL ({CL:.5f})")
                 return True
 
         return False
@@ -553,7 +553,7 @@ class BasisAdxBot:
         sl_price = signal_info['sl']
 
         if sl_price >= entry_price:
-            log.warning(f"  SL ({sl_price:.2f}) >= entry ({entry_price:.2f}), adjusting")
+            log.warning(f"  SL ({sl_price:.5f}) >= entry ({entry_price:.5f}), adjusting")
             sl_price = entry_price - (entry_price * 0.01)
 
         stop_dist = abs(entry_price - sl_price)
@@ -566,8 +566,8 @@ class BasisAdxBot:
 
         log.info(f"  -- Placing BUY --")
         log.info(f"  Symbol={self.cfg['symbol']}  Lots={lot_size}")
-        log.info(f"  Entry={entry_price:.2f}  SL={sl_price:.2f}  TP={tp_price:.2f}")
-        log.info(f"  Stop dist: {stop_dist:.2f} ({stop_dist/0.01:.0f} pips)")
+        log.info(f"  Entry={entry_price:.5f}  SL={sl_price:.5f}  TP={tp_price:.5f}")
+        log.info(f"  Stop dist: {stop_dist:.5f} ({stop_dist/0.0001:.0f} pips)")
 
         order = {
             'Symbol': self.cfg['symbol'],
@@ -605,7 +605,7 @@ class BasisAdxBot:
         sl_price = signal_info['sl']
 
         if sl_price <= entry_price:
-            log.warning(f"  SL ({sl_price:.2f}) <= entry ({entry_price:.2f}), adjusting")
+            log.warning(f"  SL ({sl_price:.5f}) <= entry ({entry_price:.5f}), adjusting")
             sl_price = entry_price + (entry_price * 0.01)
 
         stop_dist = abs(entry_price - sl_price)
@@ -618,8 +618,8 @@ class BasisAdxBot:
 
         log.info(f"  -- Placing SELL --")
         log.info(f"  Symbol={self.cfg['symbol']}  Lots={lot_size}")
-        log.info(f"  Entry={entry_price:.2f}  SL={sl_price:.2f}  TP={tp_price:.2f}")
-        log.info(f"  Stop dist: {stop_dist:.2f} ({stop_dist/0.01:.0f} pips)")
+        log.info(f"  Entry={entry_price:.5f}  SL={sl_price:.5f}  TP={tp_price:.5f}")
+        log.info(f"  Stop dist: {stop_dist:.5f} ({stop_dist/0.0001:.0f} pips)")
 
         order = {
             'Symbol': self.cfg['symbol'],
@@ -665,7 +665,7 @@ class BasisAdxBot:
             price = self.get_current_price()
             log.info(f"-- Cycle at {datetime.now().strftime('%H:%M:%S')} --")
             if price:
-                log.info(f"  {self.cfg['symbol']}: Bid={price['bid']:.2f}  Ask={price['ask']:.2f}")
+                log.info(f"  {self.cfg['symbol']}: Bid={price['bid']:.5f}  Ask={price['ask']:.5f}")
 
             position = self.check_position()
 
@@ -683,7 +683,7 @@ class BasisAdxBot:
                         stop_dist_pct = abs(self.position_entry_price - self.entry_sl) / self.position_entry_price * 100.0
                         self.tp_threshold_pct = stop_dist_pct * self.cfg['tp_r_multiple']
 
-                log.info(f"  Position: #{ticket} {'LONG' if self.position_direction=='BUY' else 'SHORT'} @ {self.position_entry_price:.2f}")
+                log.info(f"  Position: #{ticket} {'LONG' if self.position_direction=='BUY' else 'SHORT'} @ {self.position_entry_price:.5f}")
                 log.info(f"  CL={self.entry_sl}  TP threshold={self.tp_threshold_pct:.3f}%")
 
                 if self.check_exit():
