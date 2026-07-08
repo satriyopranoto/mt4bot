@@ -217,14 +217,17 @@ Donchian Channel SL:
 
 | File | Description |
 |------|-------------|
-| `mt4_adx_bot.py` | Main trading bot |
+| `mt4_adx_bot.py` | Main trading bot (template — XAUUSD) |
+| `mt4_adx_bot_usdchf.py` | USDCHF variant of the bot |
 | `mt4_client.py` | WebSocket client for MtApi |
 | `check_position.py` | Check open positions & account |
 | `debug_order.py` | Debug order details |
 | `test_xauusd.py` | Test connection with XAUUSD |
 | `test_mt4_connect.py` | Test MT4 connection |
-| `adx_bot.log` | Bot activity log |
-| `adx_bot.pid` | PID file (prevents double instances) |
+| `adx_bot.log` | Bot activity log (XAUUSD) |
+| `adx_bot_usdchf.log` | Bot activity log (USDCHF) |
+| `adx_bot.pid` | PID file (XAUUSD) |
+| `adx_bot_usdchf.pid` | PID file (USDCHF) |
 
 ## 10. Troubleshooting
 
