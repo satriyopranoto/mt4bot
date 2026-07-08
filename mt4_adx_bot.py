@@ -42,7 +42,7 @@ CONFIG = {
     'port': 8222,
 
     # Symbol & timeframe
-    'symbol': 'XAUUSD',
+    'symbol': 'USDCHF',
     'timeframe': 60,               # H1
 
     # Mode
@@ -233,9 +233,9 @@ class BasisAdxBot:
     # ──────── Current Price ────────
 
     def get_current_price(self):
-        q = self.client.get_quote(self.cfg['symbol'])
-        if q:
-            tick = q.get('Tick', {})
+        """Get current Bid/Ask via SymbolInfoTick."""
+        tick = self.client.get_symbol_info_tick(self.cfg['symbol'])
+        if tick:
             return {
                 'bid': float(tick.get('Bid', 0)),
                 'ask': float(tick.get('Ask', 0)),
