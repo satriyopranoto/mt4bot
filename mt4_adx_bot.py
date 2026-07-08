@@ -69,7 +69,7 @@ CONFIG = {
     'tp_r_multiple': 0.4,          # 0.4R
 
     # Risk
-    'fixed_lot': 0.05,             # Fixed lot size (high leverage, avoid MC)
+    'fixed_lot': 0.2,              # Fixed lot size
 
     # Magic number
     'magic_number': 20260706,
@@ -761,6 +761,8 @@ class BasisAdxBot:
                 self.position_ticket = pos.get('Ticket')
                 self.position_entry_price = float(pos.get('OpenPrice', 0))
                 self.entry_sl = float(pos.get('StopLoss', 0))
+                cmd = int(pos.get('Cmd', pos.get('Operation', -1)))
+                self.position_direction = 'BUY' if cmd == 0 else 'SELL' if cmd == 1 else None
                 if self.position_entry_price and self.entry_sl:
                     sd = abs(self.position_entry_price - self.entry_sl) / self.position_entry_price * 100.0
                     self.tp_threshold_pct = sd * self.cfg['tp_r_multiple']
