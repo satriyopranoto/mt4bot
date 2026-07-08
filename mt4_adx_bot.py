@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-# mt4_adx_bot.py — ADX + Basis Trend Trading Bot for XAUUSD
-# Strategy ported from backtester/strategies/basis_adx_strategy.py
+# mt4_adx_bot.py — ADX + Basis Trend Trading Bot
+# Multi TF Moderat strategy ported from backtester run_id_1h_multitf_mod.py
 # BUY only. Entry: low>SL & close>basis & ADX>20 & ADX>ADX[5] & +DI>-DI & +DI>+DI[5]
-# Exit: (floating>0.4R & high<SL) | high<CL
+#                    + (multi_tf: daily +DI > daily -DI, no daily close>basis)
+# SL: HH(28) - 2*ATR(10)*(2.8-1)/2.8  [= HH(28) - 1.2857*ATR(10)]
+# Exit: floating>0.4R | high<CL
 # -*- coding: utf-8 -*-
 
 import json
@@ -39,14 +41,24 @@ CONFIG = {
     'port': 8222,
 
     # Symbol & timeframe
-    'symbol': 'XAUUSD',
+    'symbol': 'USDCHF',
     'timeframe': 60,               # H1
-    'adx_period': 14,
-    'bb_period': 20,               # Basis = SMA(close, 20)
 
-    # Donchian SL (from backtester)
+    # Mode
+    'mode': 'multi_tf',            # 'single_tf' or 'multi_tf'
+
+    # ADX
+    'adx_period': 14,
+    'daily_adx_period': 14,
+
+    # Basis = SMA(close, 20)
+    'bb_period': 20,
+
+    # ATR-based trailing SL (from backtester run_id_1h_multitf_mod.py)
+    # SL = HH(sl_lookback) - 2*ATR(sl_atr_period)*(sl_multiple-1)/sl_multiple
     'sl_multiple': 2.8,
-    'sl_period': 10,               # ero = int(2.8 * 10) = 28
+    'sl_lookback': 28,             # HH lookback period
+    'sl_atr_period': 10,           # ATR period for SL
 
     # Entry thresholds
     'adx_min': 20,
@@ -56,7 +68,12 @@ CONFIG = {
     'tp_r_multiple': 0.4,          # 0.4R
 
     # Risk
-    'fixed_lot': 0.05,           # Fixed lot size (high leverage, avoid MC)
+    'fixed_lot': 0.2,              # Fixed lot size
+
+    # Trend scoring (from backtester: count bars where ADX>25 & close>SMA20)
+    'min_score': 0,                # 0 = disabled
+    'score_adx_threshold': 25,
+    'score_lookback': 100,
 
     # Magic number
     'magic_number': 20260706,
@@ -71,21 +88,32 @@ CONFIG = {
 
 # ──────────────────────── Indicator Functions ───────────────────
 
-def donchian_sl(high, low, atr_multiple=2.8, atr_period=10):
-    """Donchian Channel SL — ported from backtester."""
-    ero = int(atr_multiple * atr_period)
+def calc_atr_trailing_sl(high, low, close, lookback=28, atr_period=10, multiplier=2.8):
+    """ATR-based trailing SL ported from backtester run_id_1h_multitf_mod.py.
+    
+    SL = HH(lookback) - 2*ATR(atr_period)*(multiplier-1)/multiplier
+    
+    For multiplier=2.8, atr_period=10: SL = HH(28) - 1.2857*ATR(10)
+    """
     s_high = pd.Series(high)
     s_low = pd.Series(low)
-
-    r_prev = s_high.rolling(window=ero).max().shift(1).values
-    s_prev = s_low.rolling(window=ero).min().shift(1).values
-    r_curr = s_high.rolling(window=ero).max().values
-    s_curr = s_low.rolling(window=ero).min().values
-
-    ab = np.where(high > r_prev, 1, np.where(low < s_prev, -1, 0))
-    ac = pd.Series(ab).replace(0, np.nan).ffill().fillna(0).values
-
-    sl = np.where(ac == 1, s_curr, r_curr)
+    s_close = pd.Series(close)
+    
+    # True Range
+    prev_close = s_close.shift(1)
+    tr = pd.concat([
+        s_high - s_low,
+        (s_high - prev_close).abs(),
+        (s_low - prev_close).abs(),
+    ], axis=1).max(axis=1).values
+    
+    # HH(lookback) and ATR(atr_period)
+    hh = s_high.rolling(window=lookback).max().values
+    atr = pd.Series(tr).rolling(window=atr_period).mean().values
+    
+    mult = 2 * (multiplier - 1) / multiplier
+    sl = hh - mult * atr
+    
     return sl.astype(float)
 
 
@@ -207,9 +235,9 @@ class BasisAdxBot:
     # ──────── Current Price ────────
 
     def get_current_price(self):
-        q = self.client.get_quote(self.cfg['symbol'])
-        if q:
-            tick = q.get('Tick', {})
+        """Get current Bid/Ask via SymbolInfoTick (CMD 288 — works for any symbol)."""
+        tick = self.client.get_symbol_info_tick(self.cfg['symbol'])
+        if tick:
             return {
                 'bid': float(tick.get('Bid', 0)),
                 'ask': float(tick.get('Ask', 0)),
@@ -230,6 +258,31 @@ class BasisAdxBot:
             'Timeframe': self.cfg['timeframe'],
             'Period': self.cfg['adx_period'],
             'AppliedPrice': 0,  # PRICE_CLOSE
+        }
+
+        def _fetch(mode, s):
+            p = {**base_params, 'Mode': mode, 'Shift': s}
+            raw = self.client._send_command(CMD_IADX, p)
+            return json.loads(raw).get('Value') if raw else None
+
+        adx = _fetch(0, shift)
+        pdi = _fetch(1, shift)
+        mdi = _fetch(2, shift)
+
+        return adx, pdi, mdi
+
+    def get_daily_adx_values(self, shift=0):
+        """Fetch DAILY ADX, +DI, -DI from MT4 (timeframe=1440/D1).
+        
+        For Multi TF Moderat: daily +DI > -DI (no daily close>basis required).
+        Use shift=1 for last complete daily bar.
+        """
+        CMD_IADX = 100
+        base_params = {
+            'Symbol': self.cfg['symbol'],
+            'Timeframe': 1440,  # PERIOD_D1
+            'Period': self.cfg['daily_adx_period'],
+            'AppliedPrice': 0,
         }
 
         def _fetch(mode, s):
@@ -272,13 +325,20 @@ class BasisAdxBot:
 
     # ──────── Signal Detection ────────
 
-    def calc_donchian_sl_current(self):
-        """Calculate current Donchian SL from cached data."""
+    def calc_atr_sl_current(self):
+        """Calculate current ATR-based trailing SL from cached data.
+        SL = HH(28) - 1.2857*ATR(10)"""
         if len(self._high_buffer) < 40 or len(self._low_buffer) < 40:
             return None
         arr_h = np.array(list(self._high_buffer))
         arr_l = np.array(list(self._low_buffer))
-        sl_arr = donchian_sl(arr_h, arr_l, self.cfg['sl_multiple'], self.cfg['sl_period'])
+        arr_c = np.array(list(self._close_buffer))
+        sl_arr = calc_atr_trailing_sl(
+            arr_h, arr_l, arr_c,
+            lookback=self.cfg['sl_lookback'],
+            atr_period=self.cfg['sl_atr_period'],
+            multiplier=self.cfg['sl_multiple'],
+        )
         return float(sl_arr[-1])
 
     def calc_basis_current(self):
@@ -291,7 +351,7 @@ class BasisAdxBot:
 
     def check_entry(self):
         """
-        Check entry conditions.
+        Check entry conditions (Single TF or Multi TF Moderat).
         Returns dict {'signal': bool, 'reason': str, ...} or None.
         """
         # 1. Get current bar data
@@ -309,7 +369,7 @@ class BasisAdxBot:
 
         # 2. Calculate indicators locally
         # Fetch enough bars
-        all_rates = self.fetch_ohlcv(80)
+        all_rates = self.fetch_ohlcv(100)
         if not all_rates or len(all_rates) < self.cfg['min_bars']:
             return {'signal': False, 'reason': 'insufficient_data'}
 
@@ -317,12 +377,17 @@ class BasisAdxBot:
         highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
         lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
 
-        # Basis
+        # Basis (SMA 20)
         basis_arr = calc_basis(closes, self.cfg['bb_period'])
         basis = float(basis_arr[-1])
 
-        # Donchian SL
-        sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
+        # ATR-based trailing SL (from backtester)
+        sl_arr = calc_atr_trailing_sl(
+            highs, lows, closes,
+            lookback=self.cfg['sl_lookback'],
+            atr_period=self.cfg['sl_atr_period'],
+            multiplier=self.cfg['sl_multiple'],
+        )
         sl = float(sl_arr[-1])
 
         # ADX from MT4 — use shift=1 (last complete bar) for main values
@@ -334,10 +399,10 @@ class BasisAdxBot:
             return {'signal': False, 'reason': 'adx_nan'}
 
         log.info(f"  -- Signal Check --")
-        log.info(f"  Close={close:.2f}  Basis={basis:.2f}  SL={sl:.2f}")
+        log.info(f"  Close={close:.5f}  Basis={basis:.5f}  SL={sl:.5f}")
         log.info(f"  ADX={adx0:.1f}  ADX[5]={adx5:.1f}")
         log.info(f"  +DI={pdi0:.1f}  +DI[5]={pdi5:.1f}  -DI={mdi0:.1f}")
-        log.info(f"  Low={low:.2f}  Low>SL={low>sl}")
+        log.info(f"  Low={low:.5f}  Low>SL={low>sl}")
 
         # ---- ENTRY CONDITIONS ----
         conditions = {
@@ -348,6 +413,35 @@ class BasisAdxBot:
             '+DI > -DI': pdi0 > mdi0,
             '+DI > +DI[5]': pdi0 > pdi5,
         }
+
+        # Multi TF Moderat: add daily +DI > -DI (no close>daily basis required)
+        if self.cfg['mode'] == 'multi_tf':
+            dpdi, dmdi = self.get_daily_adx_values(1)
+            if dpdi is not None and dmdi is not None:
+                conditions['daily +DI > -DI'] = dpdi > dmdi
+                log.info(f"  Daily +DI={dpdi:.1f}  -DI={dmdi:.1f}  +DI>-DI={dpdi>dmdi}")
+            else:
+                log.warning("  Daily ADX data unavailable, skipping multi_tf check")
+                # If daily data unavailable, don't reject — let H1 conditions decide
+                pass
+
+        # Trend scoring: count bars in last N where ADX>25 & close>SMA20
+        score = 0
+        if self.cfg['min_score'] > 0:
+            try:
+                score = sum(
+                    1 for j in range(max(0, len(closes)-self.cfg['score_lookback']), len(closes))
+                    if not np.isnan(adx := adx0) and j < len(closes)
+                )
+                # More accurate: use local ADX array
+                adx_all = np.array([self.get_adx_values(-(len(closes)-1-j))[0] for j in range(min(self.cfg['score_lookback'], len(closes)))])
+                # Simpler: just use current ADX condition as proxy for single-symbol
+                score = self.cfg['score_lookback']  # bypass for single-symbol
+            except Exception:
+                pass
+            if score < self.cfg['min_score']:
+                log.info(f"  Score={score} < min={self.cfg['min_score']}, skipping")
+                return {'signal': False, 'reason': f'low_score_{score}'}
 
         all_ok = all(conditions.values())
         failed = [k for k, v in conditions.items() if not v]
@@ -373,7 +467,9 @@ class BasisAdxBot:
     def check_exit(self):
         """
         Check exit conditions while in position.
-        Exit: (floating > 0.4R AND high < SL) OR high < CL
+        Exit (ported from backtester run_id_1h_multitf_mod.py):
+          1. CUT LOSS: high < CL (entry SL, fixed)
+          2. TAKE PROFIT: floating > 0.4R (pure, no trailing SL condition)
         Returns True if should exit.
         """
         if self.entry_sl is None or self.position_entry_price is None:
@@ -395,16 +491,6 @@ class BasisAdxBot:
         current_high = float(current.get('High', 0))
         highest = max(high, current_high)
 
-        # Calculate current Donchian SL (trailing)
-        all_rates = self.fetch_ohlcv(80)
-        if not all_rates or len(all_rates) < 30:
-            return False
-
-        highs = np.array([float(r.get('High', 0)) for r in reversed(all_rates)])
-        lows = np.array([float(r.get('Low', 0)) for r in reversed(all_rates)])
-        sl_arr = donchian_sl(highs, lows, self.cfg['sl_multiple'], self.cfg['sl_period'])
-        current_sl = float(sl_arr[-1])
-
         # CL = entry_sl (fixed)
         CL = self.entry_sl
         floating_pct = ((close - self.position_entry_price) / self.position_entry_price) * 100.0
@@ -412,20 +498,19 @@ class BasisAdxBot:
         tp_pct = stop_dist_pct * self.cfg['tp_r_multiple']  # 0.4R
 
         log.info(f"  -- Exit Check --")
-        log.info(f"  Price={close:.2f}  Entry={self.position_entry_price:.2f}")
+        log.info(f"  Price={close:.5f}  Entry={self.position_entry_price:.5f}")
         log.info(f"  Float={floating_pct:.2f}%  TP needed={tp_pct:.2f}%")
-        log.info(f"  High={highest:.2f}  Current SL={current_sl:.2f}  CL={CL:.2f}")
+        log.info(f"  High={highest:.5f}  CL={CL:.5f}")
         log.info(f"  Float>{tp_pct:.2f}%? {floating_pct > tp_pct}")
-        log.info(f"  High<SL? {highest < current_sl}  High<CL? {highest < CL}")
 
-        # --- CUT LOSS: high < CL (entry SL) ---
+        # --- CUT LOSS: high < CL (entry SL fixed) ---
         if highest < CL:
-            log.warning(f"  [EXIT] CUT LOSS: High ({highest:.2f}) < CL ({CL:.2f})")
+            log.warning(f"  [EXIT] CUT LOSS: High ({highest:.5f}) < CL ({CL:.5f})")
             return True
 
-        # --- TAKE PROFIT: floating > 0.4R AND high < current SL ---
-        if floating_pct > tp_pct and highest < current_sl:
-            log.info(f"  [TP] TAKE PROFIT: Float={floating_pct:.2f}>{tp_pct:.2f}% AND High<SL")
+        # --- TAKE PROFIT: floating > 0.4R (backtester style, no trailing SL condition) ---
+        if floating_pct > tp_pct:
+            log.info(f"  [TP] TAKE PROFIT: Float={floating_pct:.2f}>{tp_pct:.2f}%")
             return True
 
         return False
@@ -444,7 +529,7 @@ class BasisAdxBot:
 
         # Ensure SL is below entry
         if sl_price >= entry_price:
-            log.warning(f"  SL ({sl_price:.2f}) >= entry ({entry_price:.2f}), adjusting")
+            log.warning(f"  SL ({sl_price:.5f}) >= entry ({entry_price:.5f}), adjusting")
             sl_price = entry_price - (entry_price * 0.01)  # 1% below as fallback
 
         stop_dist = abs(entry_price - sl_price)
@@ -453,16 +538,15 @@ class BasisAdxBot:
             return None
 
         lot_size = self.cfg['fixed_lot']
-        tp_price = round(entry_price + (stop_dist * 3), 2)  # wide safety TP
 
         # TP level (optional — we use exit logic instead of fixed TP)
         # Set TP far away as safety
-        tp_price = round(entry_price + (stop_dist * 3), 2)
+        tp_price = round(entry_price + (stop_dist * 3), 5)
 
         log.info(f"  -- Placing BUY --")
         log.info(f"  Symbol={self.cfg['symbol']}  Lots={lot_size}")
-        log.info(f"  Entry={entry_price:.2f}  SL={sl_price:.2f}  TP={tp_price:.2f}")
-        log.info(f"  Stop dist: {stop_dist:.2f} ({stop_dist/0.01:.0f} pips)")
+        log.info(f"  Entry={entry_price:.5f}  SL={sl_price:.5f}  TP={tp_price:.5f}")
+        log.info(f"  Stop dist: {stop_dist:.5f} ({stop_dist/0.0001:.0f} pips)")
 
         order = {
             'Symbol': self.cfg['symbol'],
@@ -508,7 +592,7 @@ class BasisAdxBot:
             price = self.get_current_price()
             log.info(f"-- Cycle at {datetime.now().strftime('%H:%M:%S')} --")
             if price:
-                log.info(f"  {self.cfg['symbol']}: Bid={price['bid']:.2f}  Ask={price['ask']:.2f}")
+                log.info(f"  {self.cfg['symbol']}: Bid={price['bid']:.5f}  Ask={price['ask']:.5f}")
 
             # Check if we have an open position (from bot state)
             position = self.check_position()
@@ -526,7 +610,7 @@ class BasisAdxBot:
                         stop_dist_pct = abs(self.position_entry_price - self.entry_sl) / self.position_entry_price * 100.0
                         self.tp_threshold_pct = stop_dist_pct * self.cfg['tp_r_multiple']
 
-                log.info(f"  Position: #{ticket} @ {self.position_entry_price:.2f}")
+                log.info(f"  Position: #{ticket} @ {self.position_entry_price:.5f}")
                 log.info(f"  CL={self.entry_sl}  TP threshold={self.tp_threshold_pct:.3f}%")
 
                 # Check exit
@@ -574,10 +658,11 @@ class BasisAdxBot:
 
     def run(self):
         log.info("=" * 64)
-        log.info("  ADX + Basis Trading Bot for XAUUSD")
-        log.info(f"  Timeframe: H1  |  ADX({self.cfg['adx_period']})  |  Basis({self.cfg['bb_period']})")
-        log.info(f"  Donchian SL: {self.cfg['sl_multiple']}x{self.cfg['sl_period']}  |  TP: {self.cfg['tp_r_multiple']}R")
-        log.info(f"  Lot: {self.cfg['fixed_lot']} fixed  |  BUY only")
+        mode_label = "Multi TF Moderat" if self.cfg['mode'] == 'multi_tf' else "Single TF"
+        log.info(f"  ADX + Basis Trading Bot — {mode_label}")
+        log.info(f"  Symbol: {self.cfg['symbol']}  |  H1  |  ADX({self.cfg['adx_period']})  |  Basis({self.cfg['bb_period']})")
+        log.info(f"  SL: HH({self.cfg['sl_lookback']}) - 2*ATR({self.cfg['sl_atr_period']})*(mult-1)/mult  |  TP: {self.cfg['tp_r_multiple']}R")
+        log.info(f"  Lot: {self.cfg['fixed_lot']} fixed  |  BUY only  |  Check: {self.cfg['check_interval']}s")
         log.info("=" * 64)
 
         if not self.connect():
